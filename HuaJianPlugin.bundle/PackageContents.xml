@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ApplicationPackage SchemaVersion="1.0" AutodeskProduct="AutoCAD"
+    Name="花键参数生成器"
+    Description="输入花键参数并选择圆心，自动生成 30° 渐开线花键轮廓（ANSI B92.1b-1996）"
+    AppVersion="1.0.0">
+  <Components>
+    <RuntimeRequirements OS="Win64" Platform="AutoCAD" SeriesMin="R24.3" SeriesMax="R24.3" />
+    <ComponentEntry ModuleName="./Contents/Windows/HuaJianPlugin.dll"
+        AppDescription="花键参数生成器"
+        LoadOnAutoCADStartup="True"
+        LoadOnCommandInvocation="False">
+      <Commands GroupName="花键工具">
+        <Command Global="HUAJIAN" Local="HUAJIAN" />
+      </Commands>
+    </ComponentEntry>
+  </Components>
+</ApplicationPackage>
