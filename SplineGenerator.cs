@@ -125,7 +125,7 @@ namespace SplineTool
         private static string BuildNote(SplineParams p)
         {
             StringBuilder sb = new StringBuilder();
-            sb.Append("花键（外）30° 渐开线花键  精度等级：" + p.Grade);
+            sb.Append("花键（外）" + F(p.PressureAngle, 1) + "° 渐开线花键  精度等级：" + p.Grade);
             sb.Append("\\P");
             sb.Append("N=" + p.Teeth + "  DP=" + F(p.DiametralPitch, 3) + "  m=" + F(p.Module, 4) + "mm  α=" + F(p.PressureAngle, 1) + "°");
             sb.Append("\\P");
@@ -137,7 +137,9 @@ namespace SplineTool
             sb.Append("\\P");
             sb.Append("分度圆弧齿厚=" + F(p.ToothThickness, 4));
             if (!String.IsNullOrEmpty(p.ThickTol)) sb.Append("(" + p.ThickTol + ")");
-            sb.Append("  最小齿根圆弧 R" + F(p.MinRootFillet, 2));
+            if (p.InvoluteStartDiameter > 0.0)
+                sb.Append("  渐开线起始圆 Φ" + F(p.InvoluteStartDiameter, 3));
+            sb.Append("  齿根圆角 R" + F(SplineGeometry.ResolveFilletRadius(p), 3));
             return sb.ToString();
         }
 
@@ -158,6 +160,7 @@ namespace SplineTool
         public double RootDiameter;
         public double ToothThickness;
         public double MinRootFillet;
+        public double InvoluteStartDiameter;
         public string ODTol;
         public string RDTol;
         public string ThickTol;
@@ -168,7 +171,27 @@ namespace SplineTool
 
     public static class SplineGeometry
     {
-        public static Polyline BuildExternalProfile(SplineParams p)
+        private class Geom
+        {
+            public int N;
+            public double rp, ra, rf, rb, pitch, c, thetaTip;
+            public bool useFillet;
+            public double rFlank;
+            public double Rfil;
+            public double thetaRoot;
+            public double rootSweep;
+            public double qAng;
+            public Point2d pL, pR, cL, cR, qL, qR;
+            public double bulgeFilL, bulgeFilR, bulgeRoot;
+        }
+
+        public static double ResolveFilletRadius(SplineParams p)
+        {
+            Geom g = Prepare(p);
+            return g.useFillet ? g.Rfil : p.MinRootFillet;
+        }
+
+        private static Geom Prepare(SplineParams p)
         {
             int N = p.Teeth;
             double alpha = p.PressureAngle * Math.PI / 180.0;
@@ -181,51 +204,127 @@ namespace SplineTool
             if (!(rf < rp && rp < ra)) throw new InvalidOperationException("直径需满足：齿根圆 < 分度圆 < 齿顶圆。");
             if (rf <= rb)
                 throw new InvalidOperationException("齿根圆直径(" + (2.0 * rf).ToString("F3") +
-                    ")需大于基圆直径(" + (2.0 * rb).ToString("F3") + ")，当前版本暂不支持根切花键。");
+                    ")需大于基圆直径(" + (2.0 * rb).ToString("F3") + ")。");
 
             double pitch = 2.0 * Math.PI / N;
             double invP = Inv(alpha);
             double betaP = p.ToothThickness / (2.0 * rp);
             double c = betaP + invP;
-            double invF = InvAt(rb, rf);
-            double invA = InvAt(rb, ra);
-            double thetaRoot = c - invF;
-            double thetaTip = c - invA;
-            if (thetaRoot <= 0.0) throw new InvalidOperationException("齿厚过大，请检查齿厚与分度圆参数。");
-            double rootSweep = pitch - 2.0 * thetaRoot;
-            if (rootSweep <= 0.0)
-                throw new InvalidOperationException("齿根处相邻齿发生干涉，请减小齿厚或增大齿根圆直径。");
+            double thetaTip = c - InvAt(rb, ra);
+            if (betaP <= 0.0) throw new InvalidOperationException("分度圆弧齿厚需大于 0。");
+            if (thetaTip <= 0.0) throw new InvalidOperationException("齿顶厚度过小，请检查齿厚或齿顶圆直径。");
 
+            Geom g = new Geom();
+            g.N = N;
+            g.rp = rp;
+            g.ra = ra;
+            g.rf = rf;
+            g.rb = rb;
+            g.pitch = pitch;
+            g.c = c;
+            g.thetaTip = thetaTip;
+
+            if (p.InvoluteStartDiameter > 0.0)
+            {
+                double rst = p.InvoluteStartDiameter / 2.0;
+                if (rst <= rb)
+                    throw new InvalidOperationException("渐开线起始圆直径需大于基圆直径(" + (2.0 * rb).ToString("F3") + ")。");
+                if (rst <= rf)
+                    throw new InvalidOperationException("渐开线起始圆直径需大于齿根圆直径。");
+                if (rst >= ra)
+                    throw new InvalidOperationException("渐开线起始圆直径需小于齿顶圆直径。");
+
+                double rMax = FilletRadiusAt(rb, rf, c, rst);
+                double R = (p.MinRootFillet > 0.0) ? p.MinRootFillet : rMax;
+                double rt = SolveTangencyRadius(rb, rf, c, R, rst);
+                if (rt > rst + 1.0e-9)
+                {
+                    R = rMax;
+                    rt = rst;
+                }
+
+                double th = c - InvAt(rb, rt);
+                Point2d pr = new Point2d(rt * Math.Cos(th), rt * Math.Sin(th));
+                double al = Math.Acos(Math.Min(1.0, rb / rt));
+                double tau = th + al;
+                Point2d cr = new Point2d(pr.X + R * Math.Sin(tau), pr.Y - R * Math.Cos(tau));
+                double cAng = Math.Atan2(cr.Y, cr.X);
+                Point2d qr = new Point2d(rf * Math.Cos(cAng), rf * Math.Sin(cAng));
+
+                g.useFillet = true;
+                g.rFlank = rt;
+                g.Rfil = R;
+                g.pR = pr;
+                g.cR = cr;
+                g.qR = qr;
+                g.pL = new Point2d(pr.X, -pr.Y);
+                g.cL = new Point2d(cr.X, -cr.Y);
+                g.qL = new Point2d(qr.X, -qr.Y);
+                g.qAng = cAng;
+                g.bulgeFilR = ArcBulge(g.pR, g.qR, g.cR);
+                g.bulgeFilL = ArcBulge(g.qL, g.pL, g.cL);
+                g.rootSweep = pitch - 2.0 * cAng;
+                if (g.rootSweep <= 0.0)
+                    throw new InvalidOperationException("齿根圆角过大，相邻齿根圆角干涉，请减小圆角半径。");
+                g.bulgeRoot = Math.Tan(g.rootSweep / 4.0);
+            }
+            else
+            {
+                g.useFillet = false;
+                g.rFlank = rf;
+                g.thetaRoot = c - InvAt(rb, rf);
+                if (g.thetaRoot <= 0.0) throw new InvalidOperationException("齿厚过大，请检查齿厚与分度圆参数。");
+                g.rootSweep = pitch - 2.0 * g.thetaRoot;
+                if (g.rootSweep <= 0.0)
+                    throw new InvalidOperationException("齿根处相邻齿发生干涉，请减小齿厚或增大齿根圆直径。");
+                g.bulgeRoot = Math.Tan(g.rootSweep / 4.0);
+            }
+            return g;
+        }
+
+        public static Polyline BuildExternalProfile(SplineParams p)
+        {
+            Geom g = Prepare(p);
             const int segs = 24;
             Polyline pl = new Polyline();
-            for (int k = 0; k < N; k++)
+            for (int k = 0; k < g.N; k++)
             {
-                double rot = k * pitch;
-
-                // 左齿廓：齿根 -> 齿顶（极角增大）
-                for (int i = (k == 0 ? 0 : 1); i <= segs; i++)
+                double rot = k * g.pitch;
+                if (g.useFillet)
                 {
-                    double r = rf + (ra - rf) * i / segs;
-                    double theta = -c + InvAt(rb, r) + rot;
-                    pl.AddVertexAt(pl.NumberOfVertices, Pt(r, theta), 0.0, 0.0, 0.0);
+                    if (k == 0)
+                        pl.AddVertexAt(pl.NumberOfVertices, Rot(g.qL, rot), 0.0, 0.0, 0.0);
+                    pl.AddVertexAt(pl.NumberOfVertices, Rot(g.pL, rot), g.bulgeFilL, 0.0, 0.0);
+                    for (int i = 1; i <= segs; i++)
+                    {
+                        double r = g.rFlank + (g.ra - g.rFlank) * i / segs;
+                        pl.AddVertexAt(pl.NumberOfVertices, Pt(r, -g.c + InvAt(g.rb, r) + rot), 0.0, 0.0, 0.0);
+                    }
+                    pl.AddVertexAt(pl.NumberOfVertices, Pt(g.ra, g.thetaTip + rot), Math.Tan(g.thetaTip / 2.0), 0.0, 0.0);
+                    for (int i = segs - 1; i >= 0; i--)
+                    {
+                        double r = g.rFlank + (g.ra - g.rFlank) * i / segs;
+                        pl.AddVertexAt(pl.NumberOfVertices, Pt(r, g.c - InvAt(g.rb, r) + rot), 0.0, 0.0, 0.0);
+                    }
+                    pl.AddVertexAt(pl.NumberOfVertices, Rot(g.qR, rot), g.bulgeFilR, 0.0, 0.0);
+                    pl.AddVertexAt(pl.NumberOfVertices, Rot(g.qL, rot + g.pitch), g.bulgeRoot, 0.0, 0.0);
                 }
-
-                // 齿顶圆弧
-                double bulgeTip = Math.Tan(thetaTip / 2.0);
-                pl.AddVertexAt(pl.NumberOfVertices, Pt(ra, thetaTip + rot), bulgeTip, 0.0, 0.0);
-
-                // 右齿廓：齿顶 -> 齿根（极角增大）
-                for (int i = segs - 1; i >= 0; i--)
+                else
                 {
-                    double r = rf + (ra - rf) * i / segs;
-                    double theta = c - InvAt(rb, r) + rot;
-                    pl.AddVertexAt(pl.NumberOfVertices, Pt(r, theta), 0.0, 0.0, 0.0);
+                    for (int i = (k == 0 ? 0 : 1); i <= segs; i++)
+                    {
+                        double r = g.rf + (g.ra - g.rf) * i / segs;
+                        pl.AddVertexAt(pl.NumberOfVertices, Pt(r, -g.c + InvAt(g.rb, r) + rot), 0.0, 0.0, 0.0);
+                    }
+                    pl.AddVertexAt(pl.NumberOfVertices, Pt(g.ra, g.thetaTip + rot), Math.Tan(g.thetaTip / 2.0), 0.0, 0.0);
+                    for (int i = segs - 1; i >= 0; i--)
+                    {
+                        double r = g.rf + (g.ra - g.rf) * i / segs;
+                        pl.AddVertexAt(pl.NumberOfVertices, Pt(r, g.c - InvAt(g.rb, r) + rot), 0.0, 0.0, 0.0);
+                    }
+                    double nextTheta = -g.c + InvAt(g.rb, g.rf) + rot + g.pitch;
+                    pl.AddVertexAt(pl.NumberOfVertices, Pt(g.rf, nextTheta), g.bulgeRoot, 0.0, 0.0);
                 }
-
-                // 齿根圆弧 -> 下一齿左齿廓齿根
-                double bulgeRoot = Math.Tan(rootSweep / 4.0);
-                double nextTheta = -c + invF + rot + pitch;
-                pl.AddVertexAt(pl.NumberOfVertices, Pt(rf, nextTheta), bulgeRoot, 0.0, 0.0);
             }
             pl.Closed = true;
             return pl;
@@ -233,67 +332,141 @@ namespace SplineTool
 
         public static List<Entity> BuildExternalProfileSplines(SplineParams p)
         {
-            int N = p.Teeth;
-            double alpha = p.PressureAngle * Math.PI / 180.0;
-            double rp = p.PitchDiameter / 2.0;
-            double ra = p.OutsideDiameter / 2.0;
-            double rf = p.RootDiameter / 2.0;
-            double rb = rp * Math.Cos(alpha);
-
-            if (N < 3) throw new InvalidOperationException("齿数需大于等于 3。");
-            if (!(rf < rp && rp < ra)) throw new InvalidOperationException("直径需满足：齿根圆 < 分度圆 < 齿顶圆。");
-            if (rf <= rb)
-                throw new InvalidOperationException("齿根圆直径(" + (2.0 * rf).ToString("F3") +
-                    ")需大于基圆直径(" + (2.0 * rb).ToString("F3") + ")，当前版本暂不支持根切花键。");
-
-            double pitch = 2.0 * Math.PI / N;
-            double invP = Inv(alpha);
-            double betaP = p.ToothThickness / (2.0 * rp);
-            double c = betaP + invP;
-            double invF = InvAt(rb, rf);
-            double invA = InvAt(rb, ra);
-            double thetaRoot = c - invF;
-            double thetaTip = c - invA;
-            if (thetaRoot <= 0.0) throw new InvalidOperationException("齿厚过大，请检查齿厚与分度圆参数。");
-            double rootSweep = pitch - 2.0 * thetaRoot;
-            if (rootSweep <= 0.0)
-                throw new InvalidOperationException("齿根处相邻齿发生干涉，请减小齿厚或增大齿根圆直径。");
-
-            const int fit = 20; // 每条齿廓样条的拟合点数
+            Geom g = Prepare(p);
+            const int fit = 20;
             List<Entity> parts = new List<Entity>();
-            for (int k = 0; k < N; k++)
+            for (int k = 0; k < g.N; k++)
             {
-                double rot = k * pitch;
+                double rot = k * g.pitch;
 
-                // 左齿廓样条：齿根 -> 齿顶
                 Point3dCollection leftPts = new Point3dCollection();
                 for (int i = 0; i <= fit; i++)
                 {
-                    double r = rf + (ra - rf) * i / fit;
-                    leftPts.Add(P3(r, -c + InvAt(rb, r) + rot));
+                    double r = g.rFlank + (g.ra - g.rFlank) * i / fit;
+                    leftPts.Add(P3(r, -g.c + InvAt(g.rb, r)));
                 }
                 Spline left = new Spline(leftPts, 3, 0.0);
+                RotateEntity(left, rot);
                 parts.Add(left);
 
-                // 右齿廓样条：齿根 -> 齿顶
                 Point3dCollection rightPts = new Point3dCollection();
                 for (int i = 0; i <= fit; i++)
                 {
-                    double r = rf + (ra - rf) * i / fit;
-                    rightPts.Add(P3(r, c - InvAt(rb, r) + rot));
+                    double r = g.rFlank + (g.ra - g.rFlank) * i / fit;
+                    rightPts.Add(P3(r, g.c - InvAt(g.rb, r)));
                 }
                 Spline right = new Spline(rightPts, 3, 0.0);
+                RotateEntity(right, rot);
                 parts.Add(right);
 
-                // 齿顶圆弧（真圆弧）
-                Arc tipArc = new Arc(Point3d.Origin, ra, -thetaTip + rot, thetaTip + rot);
+                Arc tipArc = new Arc(Point3d.Origin, g.ra, -g.thetaTip, g.thetaTip);
+                RotateEntity(tipArc, rot);
                 parts.Add(tipArc);
 
-                // 齿根圆弧（真圆弧，连接本齿右齿根与下一齿左齿根）
-                Arc rootArc = new Arc(Point3d.Origin, rf, thetaRoot + rot, -thetaRoot + rot + pitch);
-                parts.Add(rootArc);
+                if (g.useFillet)
+                {
+                    double als = Math.Atan2(g.qL.Y - g.cL.Y, g.qL.X - g.cL.X);
+                    double alp = Math.Atan2(g.pL.Y - g.cL.Y, g.pL.X - g.cL.X);
+                    double swL = NormPositive(alp - als);
+                    Arc leftFil = new Arc(new Point3d(g.cL.X, g.cL.Y, 0.0), g.Rfil, als, als + swL);
+                    RotateEntity(leftFil, rot);
+                    parts.Add(leftFil);
+
+                    double ars = Math.Atan2(g.pR.Y - g.cR.Y, g.pR.X - g.cR.X);
+                    double arq = Math.Atan2(g.qR.Y - g.cR.Y, g.qR.X - g.cR.X);
+                    double swR = NormPositive(arq - ars);
+                    Arc rightFil = new Arc(new Point3d(g.cR.X, g.cR.Y, 0.0), g.Rfil, ars, ars + swR);
+                    RotateEntity(rightFil, rot);
+                    parts.Add(rightFil);
+
+                    double qStart = Math.Atan2(g.qR.Y, g.qR.X);
+                    Arc rootArc = new Arc(Point3d.Origin, g.rf, qStart, qStart + g.rootSweep);
+                    RotateEntity(rootArc, rot);
+                    parts.Add(rootArc);
+                }
+                else
+                {
+                    Arc rootArc = new Arc(Point3d.Origin, g.rf, g.thetaRoot, -g.thetaRoot + g.pitch);
+                    RotateEntity(rootArc, rot);
+                    parts.Add(rootArc);
+                }
             }
             return parts;
+        }
+
+        private static double FilletRadiusAt(double rb, double rf, double c, double r)
+        {
+            double th = c - InvAt(rb, r);
+            double al = Math.Acos(Math.Min(1.0, rb / r));
+            double tau = th + al;
+            double px = r * Math.Cos(th);
+            double py = r * Math.Sin(th);
+            double pn = px * Math.Sin(tau) - py * Math.Cos(tau);
+            double denom = 2.0 * (pn - rf);
+            if (Math.Abs(denom) < 1.0e-12)
+                throw new InvalidOperationException("无法计算齿根圆角半径。");
+            double R = (rf * rf - r * r) / denom;
+            if (R <= 0.0)
+                throw new InvalidOperationException("渐开线起始圆位置无法构造齿根圆角。");
+            return R;
+        }
+
+        private static double SolveTangencyRadius(double rb, double rf, double c, double R, double hi)
+        {
+            double lo = rb * (1.0 + 1.0e-9);
+            double fHi = FilletError(rb, rf, c, R, hi);
+            if (fHi >= 0.0) return hi;
+            double fLo = FilletError(rb, rf, c, R, lo);
+            if (fLo >= 0.0) return lo;
+            for (int i = 0; i < 200; i++)
+            {
+                double mid = 0.5 * (lo + hi);
+                double fm = FilletError(rb, rf, c, R, mid);
+                if (fm < 0.0) lo = mid;
+                else hi = mid;
+            }
+            return 0.5 * (lo + hi);
+        }
+
+        private static double FilletError(double rb, double rf, double c, double R, double r)
+        {
+            double th = c - InvAt(rb, r);
+            double al = Math.Acos(Math.Min(1.0, rb / r));
+            double tau = th + al;
+            double cx = r * Math.Cos(th) + R * Math.Sin(tau);
+            double cy = r * Math.Sin(th) - R * Math.Cos(tau);
+            return Math.Sqrt(cx * cx + cy * cy) - (rf + R);
+        }
+
+        private static double ArcBulge(Point2d a, Point2d b, Point2d center)
+        {
+            double a1 = Math.Atan2(a.Y - center.Y, a.X - center.X);
+            double a2 = Math.Atan2(b.Y - center.Y, b.X - center.X);
+            double sweep = a2 - a1;
+            while (sweep <= -Math.PI) sweep += 2.0 * Math.PI;
+            while (sweep > Math.PI) sweep -= 2.0 * Math.PI;
+            return Math.Tan(sweep / 4.0);
+        }
+
+        private static double NormPositive(double a)
+        {
+            double tw = 2.0 * Math.PI;
+            a = a % tw;
+            if (a < 0.0) a += tw;
+            return a;
+        }
+
+        private static Point2d Rot(Point2d p, double angle)
+        {
+            double ca = Math.Cos(angle);
+            double sa = Math.Sin(angle);
+            return new Point2d(p.X * ca - p.Y * sa, p.X * sa + p.Y * ca);
+        }
+
+        private static void RotateEntity(Entity ent, double angle)
+        {
+            if (Math.Abs(angle) > 1.0e-12)
+                ent.TransformBy(Matrix3d.Rotation(angle, Vector3d.ZAxis, Point3d.Origin));
         }
 
         private static double Inv(double alpha)
@@ -328,6 +501,7 @@ namespace SplineTool
         private NumericUpDown od;
         private NumericUpDown rd;
         private NumericUpDown thick;
+        private NumericUpDown startDia;
         private NumericUpDown fillet;
         private TextBox odTol;
         private TextBox rdTol;
@@ -346,7 +520,7 @@ namespace SplineTool
             MaximizeBox = false;
             MinimizeBox = false;
             StartPosition = FormStartPosition.CenterScreen;
-            ClientSize = new Size(430, 512);
+            ClientSize = new Size(430, 544);
             Font = new System.Drawing.Font("Microsoft YaHei UI", 9F);
             DoubleBuffered = true;
 
@@ -358,58 +532,63 @@ namespace SplineTool
             int tolW = 142;
 
             Controls.Add(MakeLabel("径节 (DP)", labelX, y));
-            dp = MakeNumeric(ctrlX, y, ctrlW, 16m, 0, 1m, 100000m, 1m);
+            dp = MakeNumeric(ctrlX, y, ctrlW, 10m, 0, 1m, 100000m, 1m);
             Controls.Add(dp);
             y += 32;
 
             Controls.Add(MakeLabel("模数 (mm)", labelX, y));
-            module = MakeNumeric(ctrlX, y, ctrlW, 1.5875m, 4, 0.0001m, 1000m, 0.0001m);
+            module = MakeNumeric(ctrlX, y, ctrlW, 2.54m, 4, 0.0001m, 1000m, 0.0001m);
             Controls.Add(module);
             y += 32;
 
             Controls.Add(MakeLabel("齿数", labelX, y));
-            teeth = MakeNumeric(ctrlX, y, ctrlW, 112m, 0, 3m, 100000m, 1m);
+            teeth = MakeNumeric(ctrlX, y, ctrlW, 65m, 0, 3m, 100000m, 1m);
             Controls.Add(teeth);
             y += 32;
 
             Controls.Add(MakeLabel("压力角 (°)", labelX, y));
-            pressure = MakeNumeric(ctrlX, y, ctrlW, 30m, 1, 5m, 60m, 0.5m);
+            pressure = MakeNumeric(ctrlX, y, ctrlW, 14.5m, 1, 5m, 60m, 0.5m);
             Controls.Add(pressure);
             y += 32;
 
             Controls.Add(MakeLabel("分度圆直径", labelX, y));
-            pd = MakeNumeric(ctrlX, y, ctrlW, 177.8m, 3, 0.001m, 100000m, 0.001m);
+            pd = MakeNumeric(ctrlX, y, ctrlW, 165.1m, 3, 0.001m, 100000m, 0.001m);
             Controls.Add(pd);
             y += 32;
 
             Controls.Add(MakeLabel("齿顶圆直径", labelX, y));
-            od = MakeNumeric(ctrlX, y, ctrlW, 179.3m, 3, 0.001m, 100000m, 0.001m);
-            odTol = MakeTextBox(tolX, y, tolW, "0 / -0.25");
+            od = MakeNumeric(ctrlX, y, ctrlW, 166.42m, 3, 0.001m, 100000m, 0.001m);
+            odTol = MakeTextBox(tolX, y, tolW, "0 / -0.127");
             Controls.Add(od);
             Controls.Add(odTol);
             y += 32;
 
             Controls.Add(MakeLabel("齿根圆直径", labelX, y));
-            rd = MakeNumeric(ctrlX, y, ctrlW, 174.94m, 3, 0.001m, 100000m, 0.001m);
-            rdTol = MakeTextBox(tolX, y, tolW, "0 / -0.4");
+            rd = MakeNumeric(ctrlX, y, ctrlW, 160.530m, 3, 0.001m, 100000m, 0.001m);
+            rdTol = MakeTextBox(tolX, y, tolW, "0 / -0.254");
             Controls.Add(rd);
             Controls.Add(rdTol);
             y += 32;
 
             Controls.Add(MakeLabel("分度圆弧齿厚", labelX, y));
-            thick = MakeNumeric(ctrlX, y, ctrlW, 2.494m, 4, 0.0001m, 100000m, 0.0001m);
-            thickTol = MakeTextBox(tolX, y, tolW, "-0.03 / -0.0825");
+            thick = MakeNumeric(ctrlX, y, ctrlW, 3.99m, 4, 0.0001m, 100000m, 0.0001m);
+            thickTol = MakeTextBox(tolX, y, tolW, "-0.147 / -0.222");
             Controls.Add(thick);
             Controls.Add(thickTol);
             y += 32;
 
-            Controls.Add(MakeLabel("最小齿根圆弧", labelX, y));
-            fillet = MakeNumeric(ctrlX, y, ctrlW, 0.6m, 2, 0m, 100000m, 0.1m);
+            Controls.Add(MakeLabel("渐开线起始圆", labelX, y));
+            startDia = MakeNumeric(ctrlX, y, ctrlW, 163.540m, 3, 0m, 100000m, 0.001m);
+            Controls.Add(startDia);
+            y += 32;
+
+            Controls.Add(MakeLabel("齿根圆角半径", labelX, y));
+            fillet = MakeNumeric(ctrlX, y, ctrlW, 0m, 2, 0m, 100000m, 0.1m);
             Controls.Add(fillet);
             y += 32;
 
             Controls.Add(MakeLabel("精度等级", labelX, y));
-            grade = MakeTextBox(ctrlX, y, ctrlW + tolW, "5级（ANSI B92.1b-1996）");
+            grade = MakeTextBox(ctrlX, y, ctrlW + tolW, "未注");
             Controls.Add(grade);
             y += 34;
 
@@ -429,7 +608,7 @@ namespace SplineTool
             Controls.Add(addNote);
             y += 28;
 
-            Label hint = MakeLabel("点击【确定】后，在图形中拾取花键中心点。", labelX, y);
+            Label hint = MakeLabel("渐开线起始圆填 0 = 不启用；齿根圆角填 0 = 按起始圆自动相切。", labelX, y);
             hint.ForeColor = Color.Gray;
             Controls.Add(hint);
             y += 30;
@@ -558,6 +737,13 @@ namespace SplineTool
                     MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
+            if ((double)startDia.Value > 0.0 &&
+                !((double)rd.Value < (double)startDia.Value && (double)startDia.Value < (double)od.Value))
+            {
+                MessageBox.Show("渐开线起始圆直径需介于齿根圆与齿顶圆之间。", "花键生成器",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
             if ((double)thick.Value <= 0.0)
             {
                 MessageBox.Show("分度圆弧齿厚需大于 0。", "花键生成器",
@@ -575,6 +761,7 @@ namespace SplineTool
             p.RootDiameter = (double)rd.Value;
             p.ToothThickness = (double)thick.Value;
             p.MinRootFillet = (double)fillet.Value;
+            p.InvoluteStartDiameter = (double)startDia.Value;
             p.ODTol = odTol.Text.Trim();
             p.RDTol = rdTol.Text.Trim();
             p.ThickTol = thickTol.Text.Trim();
