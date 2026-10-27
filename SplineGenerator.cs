@@ -100,16 +100,6 @@ namespace SplineTool
                         tr.AddNewlyCreatedDBObject(note, true);
                     }
 
-                    // 水印：作者与联系方式（始终生成，独立于参数注释）
-                    MText wm = new MText();
-                    wm.SetDatabaseDefaults(db);
-                    wm.Location = center + new Vector3d(-28.0, -(p.OutsideDiameter / 2.0 + 25.0), 0);
-                    wm.TextHeight = 3.0;
-                    wm.ColorIndex = 9;
-                    wm.Contents = "作者：吴浩然  联系方式：18240187400";
-                    btr.AppendEntity(wm);
-                    tr.AddNewlyCreatedDBObject(wm, true);
-
                     tr.Commit();
                 }
                 string modeName = (p.OutputMode == 1) ? "样条曲线模式（每齿独立对象）" : "整体多段线模式";
@@ -587,7 +577,7 @@ namespace SplineTool
             MaximizeBox = false;
             MinimizeBox = false;
             StartPosition = FormStartPosition.CenterScreen;
-            ClientSize = new Size(430, 544);
+            ClientSize = new Size(430, 516);
             Font = new System.Drawing.Font("Microsoft YaHei UI", 9F);
             DoubleBuffered = true;
 
@@ -696,41 +686,9 @@ namespace SplineTool
             AcceptButton = ok;
             CancelButton = cancel;
 
-            // 界面水印：底部版权信息
-            Label wmFooter = new Label();
-            wmFooter.Text = "作者：吴浩然　联系方式：18240187400";
-            wmFooter.Location = new Point(0, ClientSize.Height - 24);
-            wmFooter.Size = new Size(ClientSize.Width, 20);
-            wmFooter.TextAlign = ContentAlignment.MiddleCenter;
-            wmFooter.ForeColor = Color.FromArgb(140, 140, 140);
-            wmFooter.Font = new System.Drawing.Font("Microsoft YaHei UI", 8F, FontStyle.Italic);
-            Controls.Add(wmFooter);
-
             dp.ValueChanged += OnDpChanged;
             module.ValueChanged += OnModuleChanged;
             teeth.ValueChanged += OnTeethChanged;
-        }
-
-        protected override void OnPaint(PaintEventArgs e)
-        {
-            base.OnPaint(e);
-            // 背景斜向水印
-            Graphics g = e.Graphics;
-            string wm = "作者：吴浩然　18240187400";
-            using (System.Drawing.Font f = new System.Drawing.Font(this.Font.FontFamily, 24F, FontStyle.Bold, GraphicsUnit.Point))
-            {
-                SizeF sz = g.MeasureString(wm, f);
-                float cx = ClientSize.Width / 2f;
-                float cy = ClientSize.Height / 2f - 10f;
-                g.TranslateTransform(cx, cy);
-                g.RotateTransform(-25f);
-                g.TranslateTransform(-sz.Width / 2f, -sz.Height / 2f);
-                using (SolidBrush b = new SolidBrush(Color.FromArgb(34, 120, 120, 120)))
-                {
-                    g.DrawString(wm, f, b, 0f, 0f);
-                }
-                g.ResetTransform();
-            }
         }
 
         private void OnDpChanged(object sender, EventArgs e)

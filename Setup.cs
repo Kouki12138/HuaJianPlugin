@@ -29,7 +29,7 @@ namespace SplineSetup
             MaximizeBox = false;
             MinimizeBox = false;
             StartPosition = FormStartPosition.CenterScreen;
-            ClientSize = new Size(470, 210);
+            ClientSize = new Size(470, 190);
             Font = new System.Drawing.Font("Microsoft YaHei UI", 9F);
 
             status = new Label();
@@ -47,15 +47,6 @@ namespace SplineSetup
             closeBtn.Click += OnCloseClick;
             Controls.Add(closeBtn);
 
-            // 水印：一行版权信息
-            Label wm = new Label();
-            wm.Text = "作者：吴浩然　联系方式：18240187400";
-            wm.Location = new Point(0, ClientSize.Height - 26);
-            wm.Size = new Size(ClientSize.Width, 20);
-            wm.TextAlign = ContentAlignment.MiddleCenter;
-            wm.ForeColor = Color.FromArgb(140, 140, 140);
-            wm.Font = new System.Drawing.Font("Microsoft YaHei UI", 8.5F, FontStyle.Italic);
-            Controls.Add(wm);
         }
 
         protected override void OnShown(EventArgs e)
