@@ -237,7 +237,7 @@ namespace SplineTool
                 double rMax = FilletRadiusAt(rb, rf, c, rst);
                 double R = (p.MinRootFillet > 0.0) ? p.MinRootFillet : rMax;
                 double rt = SolveTangencyRadius(rb, rf, c, R, rst);
-                if (rt > rst + 1.0e-9)
+                if (rt > rst + 1.0e-9 || FilletError(rb, rf, c, R, rst) < 0.0)
                 {
                     R = rMax;
                     rt = rst;
