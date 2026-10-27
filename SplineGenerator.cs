@@ -139,7 +139,7 @@ namespace SplineTool
             if (!String.IsNullOrEmpty(p.ThickTol)) sb.Append("(" + p.ThickTol + ")");
             if (p.InvoluteStartDiameter > 0.0)
                 sb.Append("  渐开线起始圆 Φ" + F(p.InvoluteStartDiameter, 3));
-            sb.Append("  齿根圆角 R" + F(SplineGeometry.ResolveFilletRadius(p), 3));
+            sb.Append("  齿根圆弧 R" + F(SplineGeometry.ResolveFilletRadius(p), 3));
             return sb.ToString();
         }
 
@@ -178,11 +178,12 @@ namespace SplineTool
             public bool useFillet;
             public double rFlank;
             public double Rfil;
+            public double thetaT;
             public double thetaRoot;
             public double rootSweep;
-            public double qAng;
-            public Point2d pL, pR, cL, cR, qL, qR;
-            public double bulgeFilL, bulgeFilR, bulgeRoot;
+            public double rootCx, rootCy;
+            public double rootArcStart, rootArcSweep;
+            public double rootBulge;
         }
 
         public static double ResolveFilletRadius(SplineParams p)
@@ -234,39 +235,65 @@ namespace SplineTool
                 if (rst >= ra)
                     throw new InvalidOperationException("渐开线起始圆直径需小于齿顶圆直径。");
 
-                double rMax = FilletRadiusAt(rb, rf, c, rst);
-                double R = (p.MinRootFillet > 0.0) ? p.MinRootFillet : rMax;
-                double rt = SolveTangencyRadius(rb, rf, c, R, rst);
-                if (rt > rst + 1.0e-9 || FilletError(rb, rf, c, R, rst) < 0.0)
+                double phim = pitch / 2.0;
+                double ux = Math.Cos(phim);
+                double uy = Math.Sin(phim);
+                double rMax = MaxRadiusAtStart(rb, c, ux, uy, rst);
+
+                double R;
+                double rt;
+                if (p.MinRootFillet > 0.0)
                 {
-                    R = rMax;
-                    rt = rst;
+                    R = p.MinRootFillet;
+                    rt = SolveTangencyForRadius(rb, ra, c, R, ux, uy);
+                    if (rt > rst + 1.0e-9 || R > rMax)
+                    {
+                        R = rMax;
+                        rt = rst;
+                    }
+                }
+                else
+                {
+                    rt = SolveTangencyBottomAtRoot(rb, ra, rf, c, ux, uy);
+                    R = AutoRadius(rb, c, ux, uy, rf, rt);
+                    if (rt > rst + 1.0e-9 || R > rMax)
+                    {
+                        R = rMax;
+                        rt = rst;
+                    }
                 }
 
+                if (rt <= rb || rt >= ra)
+                    throw new InvalidOperationException("齿根圆弧构造失败，请检查参数。");
+
                 double th = c - InvAt(rb, rt);
-                Point2d pr = new Point2d(rt * Math.Cos(th), rt * Math.Sin(th));
                 double al = Math.Acos(Math.Min(1.0, rb / rt));
-                double tau = th + al;
-                Point2d cr = new Point2d(pr.X + R * Math.Sin(tau), pr.Y - R * Math.Cos(tau));
-                double cAng = Math.Atan2(cr.Y, cr.X);
-                Point2d qr = new Point2d(rf * Math.Cos(cAng), rf * Math.Sin(cAng));
+                double tau = th - al;
+                double nx = -Math.Sin(tau);
+                double ny = Math.Cos(tau);
+                double px = rt * Math.Cos(th);
+                double py = rt * Math.Sin(th);
+                double rho = px * ux + py * uy + R * (nx * ux + ny * uy);
+                double cx = rho * ux;
+                double cy = rho * uy;
+                double thetaL = pitch - th;
+                double plx = rt * Math.Cos(thetaL);
+                double ply = rt * Math.Sin(thetaL);
 
                 g.useFillet = true;
                 g.rFlank = rt;
                 g.Rfil = R;
-                g.pR = pr;
-                g.cR = cr;
-                g.qR = qr;
-                g.pL = new Point2d(pr.X, -pr.Y);
-                g.cL = new Point2d(cr.X, -cr.Y);
-                g.qL = new Point2d(qr.X, -qr.Y);
-                g.qAng = cAng;
-                g.bulgeFilR = ArcBulge(g.pR, g.qR, g.cR);
-                g.bulgeFilL = ArcBulge(g.qL, g.pL, g.cL);
-                g.rootSweep = pitch - 2.0 * cAng;
-                if (g.rootSweep <= 0.0)
-                    throw new InvalidOperationException("齿根圆角过大，相邻齿根圆角干涉，请减小圆角半径。");
-                g.bulgeRoot = Math.Tan(g.rootSweep / 4.0);
+                g.thetaT = th;
+                g.rootCx = cx;
+                g.rootCy = cy;
+                double aP = Math.Atan2(py - cy, px - cx);
+                double aL = Math.Atan2(ply - cy, plx - cx);
+                double sweep = aL - aP;
+                while (sweep <= -Math.PI) sweep += 2.0 * Math.PI;
+                while (sweep > Math.PI) sweep -= 2.0 * Math.PI;
+                g.rootBulge = Math.Tan(sweep / 4.0);
+                g.rootArcStart = NormPositive(aL);
+                g.rootArcSweep = NormPositive(aP - aL);
             }
             else
             {
@@ -277,7 +304,7 @@ namespace SplineTool
                 g.rootSweep = pitch - 2.0 * g.thetaRoot;
                 if (g.rootSweep <= 0.0)
                     throw new InvalidOperationException("齿根处相邻齿发生干涉，请减小齿厚或增大齿根圆直径。");
-                g.bulgeRoot = Math.Tan(g.rootSweep / 4.0);
+                g.rootBulge = Math.Tan(g.rootSweep / 4.0);
             }
             return g;
         }
@@ -293,8 +320,7 @@ namespace SplineTool
                 if (g.useFillet)
                 {
                     if (k == 0)
-                        pl.AddVertexAt(pl.NumberOfVertices, Rot(g.qL, rot), 0.0, 0.0, 0.0);
-                    pl.AddVertexAt(pl.NumberOfVertices, Rot(g.pL, rot), g.bulgeFilL, 0.0, 0.0);
+                        pl.AddVertexAt(pl.NumberOfVertices, Pt(g.rFlank, -g.thetaT + rot), 0.0, 0.0, 0.0);
                     for (int i = 1; i <= segs; i++)
                     {
                         double r = g.rFlank + (g.ra - g.rFlank) * i / segs;
@@ -306,8 +332,7 @@ namespace SplineTool
                         double r = g.rFlank + (g.ra - g.rFlank) * i / segs;
                         pl.AddVertexAt(pl.NumberOfVertices, Pt(r, g.c - InvAt(g.rb, r) + rot), 0.0, 0.0, 0.0);
                     }
-                    pl.AddVertexAt(pl.NumberOfVertices, Rot(g.qR, rot), g.bulgeFilR, 0.0, 0.0);
-                    pl.AddVertexAt(pl.NumberOfVertices, Rot(g.qL, rot + g.pitch), g.bulgeRoot, 0.0, 0.0);
+                    pl.AddVertexAt(pl.NumberOfVertices, Pt(g.rFlank, -g.thetaT + rot + g.pitch), g.rootBulge, 0.0, 0.0);
                 }
                 else
                 {
@@ -323,7 +348,7 @@ namespace SplineTool
                         pl.AddVertexAt(pl.NumberOfVertices, Pt(r, g.c - InvAt(g.rb, r) + rot), 0.0, 0.0, 0.0);
                     }
                     double nextTheta = -g.c + InvAt(g.rb, g.rf) + rot + g.pitch;
-                    pl.AddVertexAt(pl.NumberOfVertices, Pt(g.rf, nextTheta), g.bulgeRoot, 0.0, 0.0);
+                    pl.AddVertexAt(pl.NumberOfVertices, Pt(g.rf, nextTheta), g.rootBulge, 0.0, 0.0);
                 }
             }
             pl.Closed = true;
@@ -365,22 +390,8 @@ namespace SplineTool
 
                 if (g.useFillet)
                 {
-                    double als = Math.Atan2(g.qL.Y - g.cL.Y, g.qL.X - g.cL.X);
-                    double alp = Math.Atan2(g.pL.Y - g.cL.Y, g.pL.X - g.cL.X);
-                    double swL = NormPositive(alp - als);
-                    Arc leftFil = new Arc(new Point3d(g.cL.X, g.cL.Y, 0.0), g.Rfil, als, als + swL);
-                    RotateEntity(leftFil, rot);
-                    parts.Add(leftFil);
-
-                    double ars = Math.Atan2(g.pR.Y - g.cR.Y, g.pR.X - g.cR.X);
-                    double arq = Math.Atan2(g.qR.Y - g.cR.Y, g.qR.X - g.cR.X);
-                    double swR = NormPositive(arq - ars);
-                    Arc rightFil = new Arc(new Point3d(g.cR.X, g.cR.Y, 0.0), g.Rfil, ars, ars + swR);
-                    RotateEntity(rightFil, rot);
-                    parts.Add(rightFil);
-
-                    double qStart = Math.Atan2(g.qR.Y, g.qR.X);
-                    Arc rootArc = new Arc(Point3d.Origin, g.rf, qStart, qStart + g.rootSweep);
+                    Arc rootArc = new Arc(new Point3d(g.rootCx, g.rootCy, 0.0), g.Rfil,
+                        g.rootArcStart, g.rootArcStart + g.rootArcSweep);
                     RotateEntity(rootArc, rot);
                     parts.Add(rootArc);
                 }
@@ -394,58 +405,114 @@ namespace SplineTool
             return parts;
         }
 
-        private static double FilletRadiusAt(double rb, double rf, double c, double r)
+        private static double MaxRadiusAtStart(double rb, double c, double ux, double uy, double r)
         {
             double th = c - InvAt(rb, r);
             double al = Math.Acos(Math.Min(1.0, rb / r));
-            double tau = th + al;
+            double tau = th - al;
             double px = r * Math.Cos(th);
             double py = r * Math.Sin(th);
-            double pn = px * Math.Sin(tau) - py * Math.Cos(tau);
-            double denom = 2.0 * (pn - rf);
-            if (Math.Abs(denom) < 1.0e-12)
-                throw new InvalidOperationException("无法计算齿根圆角半径。");
-            double R = (rf * rf - r * r) / denom;
+            double nx = -Math.Sin(tau);
+            double ny = Math.Cos(tau);
+            double num = px * uy - py * ux;
+            double den = nx * uy - ny * ux;
+            if (Math.Abs(den) < 1.0e-12)
+                throw new InvalidOperationException("无法计算齿根圆弧半径。");
+            double R = -num / den;
             if (R <= 0.0)
-                throw new InvalidOperationException("渐开线起始圆位置无法构造齿根圆角。");
+                throw new InvalidOperationException("渐开线起始圆位置无法构造齿根圆弧。");
             return R;
         }
 
-        private static double SolveTangencyRadius(double rb, double rf, double c, double R, double hi)
+        private static double SolveTangencyBottomAtRoot(double rb, double ra, double rf, double c, double ux, double uy)
         {
-            double lo = rb * (1.0 + 1.0e-9);
-            double fHi = FilletError(rb, rf, c, R, hi);
-            if (fHi >= 0.0) return hi;
-            double fLo = FilletError(rb, rf, c, R, lo);
-            if (fLo >= 0.0) return lo;
-            for (int i = 0; i < 200; i++)
-            {
-                double mid = 0.5 * (lo + hi);
-                double fm = FilletError(rb, rf, c, R, mid);
-                if (fm < 0.0) lo = mid;
-                else hi = mid;
-            }
-            return 0.5 * (lo + hi);
+            return ScanRoot(rb, ra, delegate(double r) {
+                return AutoEquation(rb, rf, c, ux, uy, r);
+            }, "无法求解齿根圆弧，请检查渐开线起始圆参数。");
         }
 
-        private static double FilletError(double rb, double rf, double c, double R, double r)
+        private static double SolveTangencyForRadius(double rb, double ra, double c, double R, double ux, double uy)
+        {
+            return ScanRoot(rb, ra, delegate(double r) {
+                return GivenRadiusEquation(rb, c, R, ux, uy, r);
+            }, "无法求解齿根圆弧，请检查齿根圆弧半径。");
+        }
+
+        private static double ScanRoot(double rb, double ra, Func<double, double> fn, string error)
+        {
+            int steps = 600;
+            double prevR = rb * (1.0 + 1.0e-9);
+            double prevV = fn(prevR);
+            for (int i = 1; i <= steps; i++)
+            {
+                double r = rb + (ra - rb) * i / steps;
+                double v = fn(r);
+                if (Math.Abs(v) < 1.0e-14) return r;
+                if (prevV * v < 0.0)
+                {
+                    double lo = prevR;
+                    double hi = r;
+                    for (int j = 0; j < 100; j++)
+                    {
+                        double mid = 0.5 * (lo + hi);
+                        double mv = fn(mid);
+                        if (fn(lo) * mv <= 0.0) hi = mid;
+                        else lo = mid;
+                    }
+                    return 0.5 * (lo + hi);
+                }
+                prevR = r;
+                prevV = v;
+            }
+            throw new InvalidOperationException(error);
+        }
+
+        private static double AutoEquation(double rb, double rf, double c, double ux, double uy, double r)
         {
             double th = c - InvAt(rb, r);
             double al = Math.Acos(Math.Min(1.0, rb / r));
-            double tau = th + al;
-            double cx = r * Math.Cos(th) + R * Math.Sin(tau);
-            double cy = r * Math.Sin(th) - R * Math.Cos(tau);
-            return Math.Sqrt(cx * cx + cy * cy) - (rf + R);
+            double tau = th - al;
+            double px = r * Math.Cos(th);
+            double py = r * Math.Sin(th);
+            double nx = -Math.Sin(tau);
+            double ny = Math.Cos(tau);
+            double ax = px - rf * ux;
+            double ay = py - rf * uy;
+            double bx = nx - ux;
+            double by = ny - uy;
+            return ax * by - ay * bx;
         }
 
-        private static double ArcBulge(Point2d a, Point2d b, Point2d center)
+        private static double GivenRadiusEquation(double rb, double c, double R, double ux, double uy, double r)
         {
-            double a1 = Math.Atan2(a.Y - center.Y, a.X - center.X);
-            double a2 = Math.Atan2(b.Y - center.Y, b.X - center.X);
-            double sweep = a2 - a1;
-            while (sweep <= -Math.PI) sweep += 2.0 * Math.PI;
-            while (sweep > Math.PI) sweep -= 2.0 * Math.PI;
-            return Math.Tan(sweep / 4.0);
+            double th = c - InvAt(rb, r);
+            double al = Math.Acos(Math.Min(1.0, rb / r));
+            double tau = th - al;
+            double px = r * Math.Cos(th);
+            double py = r * Math.Sin(th);
+            double nx = -Math.Sin(tau);
+            double ny = Math.Cos(tau);
+            double ax = px + R * nx;
+            double ay = py + R * ny;
+            return ax * uy - ay * ux;
+        }
+
+        private static double AutoRadius(double rb, double c, double ux, double uy, double rf, double rt)
+        {
+            double th = c - InvAt(rb, rt);
+            double al = Math.Acos(Math.Min(1.0, rb / rt));
+            double tau = th - al;
+            double px = rt * Math.Cos(th);
+            double py = rt * Math.Sin(th);
+            double nx = -Math.Sin(tau);
+            double ny = Math.Cos(tau);
+            double den = nx * ux + ny * uy - 1.0;
+            if (Math.Abs(den) < 1.0e-12)
+                throw new InvalidOperationException("无法计算自动齿根圆弧半径。");
+            double R = (rf - px * ux - py * uy) / den;
+            if (R <= 0.0)
+                throw new InvalidOperationException("自动齿根圆弧半径异常，请检查参数。");
+            return R;
         }
 
         private static double NormPositive(double a)
@@ -582,7 +649,7 @@ namespace SplineTool
             Controls.Add(startDia);
             y += 32;
 
-            Controls.Add(MakeLabel("齿根圆角半径", labelX, y));
+            Controls.Add(MakeLabel("齿根圆弧半径", labelX, y));
             fillet = MakeNumeric(ctrlX, y, ctrlW, 0m, 2, 0m, 100000m, 0.1m);
             Controls.Add(fillet);
             y += 32;
@@ -608,7 +675,7 @@ namespace SplineTool
             Controls.Add(addNote);
             y += 28;
 
-            Label hint = MakeLabel("渐开线起始圆填 0 = 不启用；齿根圆角填 0 = 按起始圆自动相切。", labelX, y);
+            Label hint = MakeLabel("渐开线起始圆填 0 = 不启用；齿根圆弧填 0 = 自动（底部与小径相切）。", labelX, y);
             hint.ForeColor = Color.Gray;
             Controls.Add(hint);
             y += 30;
